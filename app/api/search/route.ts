@@ -109,7 +109,7 @@ export async function POST(req: NextRequest) {
 
     // 6. Build sources
     const sources = chunks.map((c: any) => {
-      const meta =
+      const meta: any =
         caseData?.find((d: any) => d.citation === c.citation) ?? {};
       return {
         citation: c.citation,
