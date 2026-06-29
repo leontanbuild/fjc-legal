@@ -11,20 +11,26 @@ const anthropic = new Anthropic({
   apiKey: process.env.ANTHROPIC_API_KEY!,
 });
 
-let embedder: any = null;
-
-async function getEmbedder() {
-  if (!embedder) {
-    const { pipeline } = await import("@xenova/transformers");
-    embedder = await pipeline("feature-extraction", "Xenova/all-MiniLM-L6-v2");
-  }
-  return embedder;
-}
-
+// Embed using Hugging Face Inference API (free, no install needed)
+// Uses the same all-MiniLM-L6-v2 model as the pipeline — vectors are compatible
 async function embedQuery(text: string): Promise<number[]> {
-  const e = await getEmbedder();
-  const out = await e(text, { pooling: "mean", normalize: true });
-  return Array.from(out.data as Float32Array);
+  const res = await fetch(
+    "https://api-inference.huggingface.co/pipeline/feature-extraction/sentence-transformers/all-MiniLM-L6-v2",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ inputs: text, options: { wait_for_model: true } }),
+    }
+  );
+
+  if (!res.ok) {
+    throw new Error(`Embedding API error: ${res.status}`);
+  }
+
+  const data = await res.json();
+  // HF returns nested array for sentence-transformers — unwrap if needed
+  const vector = Array.isArray(data[0]) ? data[0] : data;
+  return vector as number[];
 }
 
 const SYSTEM = `You are a legal research assistant specialising in Singapore family law.
@@ -47,8 +53,17 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Query too short" }, { status: 400 });
     }
 
-    const embedding = await embedQuery(query);
+    // 1. Embed the query
+    let embedding: number[];
+    try {
+      embedding = await embedQuery(query);
+    } catch (e: any) {
+      console.error("Embedding failed:", e.message);
+      // Fallback: use full-text search only (no vector similarity)
+      embedding = new Array(384).fill(0);
+    }
 
+    // 2. Hybrid search
     const { data: chunks, error } = await sb.rpc("hybrid_search", {
       query_embedding: embedding,
       query_text: query,
@@ -60,7 +75,7 @@ export async function POST(req: NextRequest) {
 
     if (error) {
       console.error("Search error:", error);
-      return NextResponse.json({ error: "Search failed" }, { status: 500 });
+      return NextResponse.json({ error: `Search failed: ${error.message}` }, { status: 500 });
     }
 
     if (!chunks || chunks.length === 0) {
@@ -70,36 +85,31 @@ export async function POST(req: NextRequest) {
       });
     }
 
+    // 3. Build context for Claude
     const context = (chunks as any[])
       .map((c: any, i: number) => `[${i + 1}] ${c.citation} (${c.chunk_type})\n${c.content}`)
       .join("\n\n---\n\n");
 
+    // 4. Generate answer
     const response = await anthropic.messages.create({
       model: "claude-haiku-4-5-20251001",
       max_tokens: 1024,
       system: SYSTEM,
-      messages: [
-        {
-          role: "user",
-          content: `Query: ${query}\n\nCase excerpts:\n\n${context}`,
-        },
-      ],
+      messages: [{ role: "user", content: `Query: ${query}\n\nCase excerpts:\n\n${context}` }],
     });
 
     const answer =
       response.content[0].type === "text" ? response.content[0].text : "";
 
+    // 5. Fetch case metadata
     const uniqueCitations = [...new Set((chunks as any[]).map((c: any) => c.citation))];
-
     const { data: caseData } = await sb
       .from("cases")
       .select("citation, court, date_decision, headnote, subject_matters, elitigation_url, url, outcome_winner, is_appellate")
       .in("citation", uniqueCitations as string[]);
 
     const caseMap: Record<string, any> = {};
-    (caseData || []).forEach((d: any) => {
-      caseMap[d.citation] = d;
-    });
+    (caseData || []).forEach((d: any) => { caseMap[d.citation] = d; });
 
     const sources = (chunks as any[]).map((c: any) => {
       const meta = caseMap[c.citation] || {};
@@ -121,6 +131,7 @@ export async function POST(req: NextRequest) {
     });
 
     return NextResponse.json({ answer, sources, usage: response.usage });
+
   } catch (err: any) {
     console.error("API error:", err);
     return NextResponse.json(
