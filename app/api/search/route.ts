@@ -96,7 +96,7 @@ async function handleAnswer(query: string, chunks: any[], filters: any) {
   const uniqueCitations = [...new Set(chunks.map((c: any) => c.citation))];
   const { data: caseData } = await sb
     .from("cases")
-    .select("citation, court, date_decision, headnote, subject_matters, elitigation_url, url, outcome_winner, is_appellate")
+    .select("citation, court, date_decision, headnote, subject_matters, elitigation_url, url, is_appellate, key_doctrine_tags, outcome_by_issue, case_strength_for, outcome_summary")
     .in("citation", uniqueCitations as string[]);
 
   const caseMap: Record<string, any> = {};
@@ -117,7 +117,10 @@ async function handleAnswer(query: string, chunks: any[], filters: any) {
       subject_matters: meta.subject_matters || [],
       elitigation_url: meta.elitigation_url || "",
       url: meta.url || "",
-      outcome_winner: meta.outcome_winner || "",
+      key_doctrine_tags: meta.key_doctrine_tags || [],
+      outcome_by_issue: meta.outcome_by_issue || [],
+      case_strength_for: meta.case_strength_for || [],
+      outcome_summary: meta.outcome_summary || "",
     };
   });
 
