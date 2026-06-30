@@ -1,5 +1,5 @@
 "use client";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 
 type Source = {
   citation: string;
@@ -14,7 +14,10 @@ type Source = {
   subject_matters: string[];
   elitigation_url: string;
   url: string;
-  outcome_winner: string;
+  key_doctrine_tags?: string[];
+  outcome_by_issue?: { issue: string; result: string }[];
+  case_strength_for?: string[];
+  outcome_summary?: string;
 };
 
 type Result = {
@@ -29,6 +32,125 @@ const EXAMPLES = [
   "Can a consent order on matrimonial assets be varied?",
 ];
 
+// Lightweight markdown renderer — handles **bold**, headers, numbered lists,
+// bullet lists, and paragraph breaks. Avoids pulling in a full markdown
+// library for a small set of patterns Claude's answers typically use.
+function formatAnswer(raw: string): JSX.Element[] {
+  const lines = raw.split("\n");
+  const blocks: JSX.Element[] = [];
+  let listItems: string[] = [];
+  let listType: "ul" | "ol" | null = null;
+  let key = 0;
+
+  const renderInline = (text: string) => {
+    const parts = text.split(/(\*\*.*?\*\*)/g);
+    return parts.map((part, i) =>
+      part.startsWith("**") && part.endsWith("**") ? (
+        <strong key={i} style={{ fontWeight: 600, color: "var(--navy)" }}>
+          {part.slice(2, -2)}
+        </strong>
+      ) : (
+        <span key={i}>{part}</span>
+      )
+    );
+  };
+
+  const flushList = () => {
+    if (listItems.length === 0) return;
+    const Tag = listType === "ol" ? "ol" : "ul";
+    blocks.push(
+      <Tag
+        key={key++}
+        style={{
+          margin: "0 0 14px 0",
+          paddingLeft: "22px",
+          fontFamily: "Georgia, serif",
+          fontSize: "14.5px",
+          lineHeight: 1.75,
+          color: "var(--navy)",
+        }}
+      >
+        {listItems.map((item, i) => (
+          <li key={i} style={{ marginBottom: "6px" }}>
+            {renderInline(item)}
+          </li>
+        ))}
+      </Tag>
+    );
+    listItems = [];
+    listType = null;
+  };
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+
+    if (!trimmed) {
+      flushList();
+      continue;
+    }
+
+    // Headers: ### or ## text
+    const headerMatch = trimmed.match(/^(#{1,3})\s+(.*)/);
+    if (headerMatch) {
+      flushList();
+      const level = headerMatch[1].length;
+      blocks.push(
+        <div
+          key={key++}
+          style={{
+            fontFamily: "Georgia, serif",
+            fontWeight: 600,
+            fontSize: level === 1 ? "18px" : level === 2 ? "16px" : "14.5px",
+            color: "var(--navy)",
+            marginTop: blocks.length > 0 ? "18px" : "0",
+            marginBottom: "8px",
+          }}
+        >
+          {renderInline(headerMatch[2])}
+        </div>
+      );
+      continue;
+    }
+
+    // Numbered list: "1. text"
+    const olMatch = trimmed.match(/^\d+\.\s+(.*)/);
+    if (olMatch) {
+      if (listType !== "ol") flushList();
+      listType = "ol";
+      listItems.push(olMatch[1]);
+      continue;
+    }
+
+    // Bullet list: "- text" or "* text"
+    const ulMatch = trimmed.match(/^[-*]\s+(.*)/);
+    if (ulMatch) {
+      if (listType !== "ul") flushList();
+      listType = "ul";
+      listItems.push(ulMatch[1]);
+      continue;
+    }
+
+    // Regular paragraph
+    flushList();
+    blocks.push(
+      <p
+        key={key++}
+        style={{
+          fontFamily: "Georgia, serif",
+          fontSize: "14.5px",
+          lineHeight: 1.8,
+          color: "var(--navy)",
+          margin: "0 0 14px 0",
+        }}
+      >
+        {renderInline(trimmed)}
+      </p>
+    );
+  }
+  flushList();
+  return blocks;
+}
+
 export default function Home() {
   const [query, setQuery] = useState("");
   const [result, setResult] = useState<Result | null>(null);
@@ -37,6 +159,14 @@ export default function Home() {
   const [selected, setSelected] = useState<Source | null>(null);
   const [filterYear, setFilterYear] = useState("");
   const [filterCourt, setFilterCourt] = useState("");
+  const [caseCount, setCaseCount] = useState<number | null>(null);
+
+  useEffect(() => {
+    fetch("/api/case-count")
+      .then((res) => res.json())
+      .then((data) => setCaseCount(data.count))
+      .catch(() => setCaseCount(null));
+  }, []);
 
   async function search(q?: string) {
     const qry = q ?? query;
@@ -133,7 +263,7 @@ export default function Home() {
 
         <div style={{ marginBottom: "14px" }}>
           <span style={{ display: "block", fontSize: "9px", fontFamily: "monospace", letterSpacing: "0.1em", textTransform: "uppercase", color: "var(--navy-mute)", marginBottom: "8px" }}>Database</span>
-          {[["Cases indexed", "5 (test)"], ["Updated", "Weekly"], ["Model", "Haiku 4.5"]].map(([k, v]) => (
+          {[["Cases indexed", caseCount !== null ? String(caseCount) : "…"], ["Updated", "Weekly"]].map(([k, v]) => (
             <div key={k} style={{ display: "flex", justifyContent: "space-between", marginBottom: "5px" }}>
               <span style={{ fontSize: "11px", color: "var(--navy-mute)" }}>{k}</span>
               <span style={{ fontSize: "11px", fontFamily: "monospace", color: "var(--navy)", fontWeight: 500 }}>{v}</span>
@@ -215,8 +345,8 @@ export default function Home() {
                   <span style={{ fontSize: "11px", color: "var(--navy-mute)", fontStyle: "italic", flex: 1, overflow: "hidden", whiteSpace: "nowrap", textOverflow: "ellipsis" }}>{query}</span>
                   <span style={{ fontSize: "10px", fontFamily: "monospace", color: "var(--amber)" }}>{uniqueSources.length} source{uniqueSources.length !== 1 ? "s" : ""}</span>
                 </div>
-                <div style={{ fontFamily: "Georgia, serif", fontSize: "14.5px", lineHeight: 1.8, color: "var(--navy)", whiteSpace: "pre-wrap" }}>
-                  {result.answer}
+                <div>
+                  {formatAnswer(result.answer)}
                 </div>
               </div>
             )}
@@ -248,9 +378,9 @@ export default function Home() {
                   <div style={{ display: "flex", gap: "4px", flexWrap: "wrap" }}>
                     <span style={{ fontFamily: "monospace", fontSize: "8px", textTransform: "uppercase", padding: "2px 5px", border: "1px solid", borderColor: s.is_appellate ? "var(--amber)" : "var(--navy-mid)", color: s.is_appellate ? "var(--amber)" : "var(--navy-mid)", background: s.is_appellate ? "var(--amber-bg)" : "transparent" }}>{s.court}</span>
                     <span style={{ fontFamily: "monospace", fontSize: "8px", textTransform: "uppercase", padding: "2px 5px", border: "1px solid var(--rule)", color: "var(--navy-mute)" }}>{s.year}</span>
-                    {s.outcome_winner && s.outcome_winner !== "unclear" && (
+                    {s.key_doctrine_tags && s.key_doctrine_tags.length > 0 && (
                       <span style={{ fontFamily: "monospace", fontSize: "8px", textTransform: "uppercase", padding: "2px 5px", border: "1px solid #2D7A4F", color: "#2D7A4F" }}>
-                        {s.outcome_winner === "split" ? "Split" : s.outcome_winner === "remitted" ? "Remitted" : `${s.outcome_winner.charAt(0).toUpperCase() + s.outcome_winner.slice(1)} won`}
+                        {s.key_doctrine_tags[0]}
                       </span>
                     )}
                   </div>
